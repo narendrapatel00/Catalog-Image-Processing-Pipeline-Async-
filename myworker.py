@@ -1,29 +1,47 @@
 import time
-from redis import Redis
-from app import process_image
+import json
 import os
+from redis import Redis
+from PIL import Image
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# -------------------------
+# Redis setup
+# -------------------------
+redis_client = Redis(host="localhost", port=6379, db=0)
 
-def run_worker():
-    print("⚡ Windows Manual Worker Started... (NO RQ, NO FORK)")
-    redis_conn = Redis.from_url(REDIS_URL)
+PROCESSED_DIR = "processed"
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-    while True:
-        job = redis_conn.blpop("job_queue", timeout=5)
-        if job:
-            _, payload = job
-            payload = payload.decode()
-            print("📥 Job Received:", payload)
+print("⚡ Windows Manual Worker Started")
+print("Waiting for jobs...")
 
-            try:
-                job_id, path, filename = payload.split("|")
-                process_image(job_id, path, filename)
-                print("✅ Job Done:", job_id)
-            except Exception as e:
-                print("❌ Error:", e)
-        else:
-            time.sleep(1)
+while True:
+    try:
+        # blocking pop (waits for job)
+        _, job_data = redis_client.blpop("image_queue")
 
-if __name__ == "__main__":
-    run_worker()
+        job = json.loads(job_data)
+        job_id = job["job_id"]
+        file_path = job["file_path"]
+        filename = job["filename"]
+
+        # update status
+        redis_client.set(f"status:{job_id}", "processing")
+        print(f"🔧 Processing job: {job_id}")
+
+        # image processing
+        img = Image.open(file_path)
+        img = img.resize((800, 800))
+
+        output_path = os.path.join(PROCESSED_DIR, filename)
+        img.save(output_path, optimize=True, quality=80)
+
+        # mark completed
+        redis_client.set(f"status:{job_id}", "completed")
+        print(f"✅ Completed job: {job_id}")
+
+    except Exception as e:
+        redis_client.set(f"status:{job_id}", "failed")
+        print("❌ Job failed:", str(e))
+
+    time.sleep(1)
